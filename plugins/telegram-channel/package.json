@@ -1,0 +1,35 @@
+{
+  "name": "@codex-telegram/telegram-channel",
+  "version": "0.1.0",
+  "description": "Telegram channel plugin for a stock Codex App Server.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tmrcodes/codex-telegram-plugin.git",
+    "directory": "plugins/telegram-channel"
+  },
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "build:runtime": "bun build scripts/telegram-launcher.ts scripts/telegram-setup.ts scripts/telegram-bootstrap.ts app-server-controller/standalone-telegram-main.ts app-server-controller/standalone-telegram-access.ts --outdir dist --target=bun --minify",
+    "verify:runtime": "python3 scripts/verify-runtime-bundles.py",
+    "verify:runtime:test": "python3 scripts/verify-runtime-bundles.test.py",
+    "start": "bun app-server-controller/standalone-telegram-main.ts",
+    "test": "python3 scripts/run-bun-tests.py",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.27.1",
+    "grammy": "1.41.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.11",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "fast-uri": "3.1.6",
+    "hono": "4.13.5",
+    "qs": "6.16.0"
+  }
+}

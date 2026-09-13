@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "telegram": {
+      "command": "bun",
+      "args": ["./dist/app-server-controller/standalone-telegram-main.js"],
+      "cwd": ".",
+      "env_vars": [
+        "CODEX_TELEGRAM_CONFIG",
+        "CODEX_TELEGRAM_OWNER_SOCKET",
+        "CODEX_TELEGRAM_OWNER_CONFIG"
+      ]
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "telegram-channel",
+  "version": "0.1.0",
+  "description": "Telegram channel for a stock Codex App Server with explicit local access control.",
+  "author": {
+    "name": "tmrcodes",
+    "url": "https://github.com/tmrcodes"
+  },
+  "homepage": "https://github.com/tmrcodes/codex-telegram-plugin#readme",
+  "repository": "https://github.com/tmrcodes/codex-telegram-plugin",
+  "license": "MIT",
+  "keywords": ["telegram", "messaging", "channel", "mcp", "codex"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Telegram Channel",
+    "shortDescription": "Talk to one Codex session through a Telegram bot.",
+    "longDescription": "A Telegram channel for stock Codex. Its terminal launcher owns one App Server and one non-evicting Telegram poller, while signed handles bind replies and attachments to their admitted origin.",
+    "developerName": "tmrcodes",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "Use connect only for the host-provided current thread, then use only signed Telegram handles supplied by the channel."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}
