@@ -1,0 +1,29 @@
+{
+  "name": "telegram-channel",
+  "version": "0.1.0",
+  "description": "Talk to a Codex session through your own Telegram bot, with local access control.",
+  "author": {
+    "name": "tmrcodes",
+    "url": "https://github.com/tmrcodes"
+  },
+  "homepage": "https://github.com/tmrcodes/codex-telegram-plugin#readme",
+  "repository": "https://github.com/tmrcodes/codex-telegram-plugin",
+  "license": "MIT",
+  "keywords": ["telegram", "messaging", "channel", "mcp", "codex"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Telegram Channel",
+    "shortDescription": "Talk to a Codex session through a Telegram bot.",
+    "longDescription": "Messages sent to your Telegram bot arrive in the Codex session you have open, and Codex answers in the same chat. Access is pairing- and allowlist-based and is managed only from your terminal. Runs on Bun with no other dependencies.",
+    "developerName": "tmrcodes",
+    "category": "Productivity",
+    "capabilities": [],
+    "websiteURL": "https://github.com/tmrcodes/codex-telegram-plugin",
+    "defaultPrompt": [
+      "Show the status of my Telegram channel",
+      "Configure the Telegram channel with my BotFather token",
+      "Pair the Telegram code my bot sent me"
+    ]
+  }
+}
