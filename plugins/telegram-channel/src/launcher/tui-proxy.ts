@@ -190,6 +190,7 @@ function bridgeConnection(client: Socket, shared: Shared): void {
   let ending = false
   // Host messages that arrive while the owner commits are held so the TUI sees the root response first.
   let held: Frame[][] = []
+  let heldReuses: Id[] = []
   let heldFrames = 0
   let heldBytes = 0
 
@@ -398,11 +399,17 @@ function bridgeConnection(client: Socket, shared: Shared): void {
         }
         const response = parseRpc(message.payload)
         if (response === 'invalid') return terminate()
-        if (response !== undefined && isId(response.id) && typeof response.method === 'string') {
-          // A host request may reuse a JSON-RPC ID we have already answered. The tombstone belongs to
-          // the request that is gone, so it must not swallow the terminal's answer to this new one.
-          answeredApprovals.delete(response.id)
-        }
+        // A host request may reuse a JSON-RPC ID we have already answered. The tombstone belongs to the
+        // request that is gone, so it must not swallow the terminal's answer to this new one — but it
+        // has to keep working until the terminal has actually seen the replacement, because until then
+        // any answer on that ID is still the stale one.
+        const reusing =
+          response !== undefined &&
+          isId(response.id) &&
+          typeof response.method === 'string' &&
+          answeredApprovals.has(response.id)
+            ? response.id
+            : undefined
         if (
           response !== undefined &&
           isId(response.id) &&
@@ -425,12 +432,14 @@ function bridgeConnection(client: Socket, shared: Shared): void {
           if (heldFrames + message.frames.length > MAX_BUFFERED_FRAMES || heldBytes + bytesHeld > MAX_BUFFERED_BYTES)
             return terminate()
           held.push(message.frames)
+          if (reusing !== undefined) heldReuses.push(reusing)
           heldFrames += message.frames.length
           heldBytes += bytesHeld
           continue
         }
         if (active === undefined || !answers(response, active)) {
           forward(client, message.frames)
+          if (reusing !== undefined) answeredApprovals.delete(reusing)
           continue
         }
         if (active.phase !== 'awaiting-host') return terminate()
@@ -460,6 +469,7 @@ function bridgeConnection(client: Socket, shared: Shared): void {
             shared.setTransitionPending(client, false)
             forward(client, message.frames)
             for (const frames of held) forward(client, frames)
+            for (const id of heldReuses.splice(0)) answeredApprovals.delete(id)
             held = []
             heldFrames = 0
             heldBytes = 0
