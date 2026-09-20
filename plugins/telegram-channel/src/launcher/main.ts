@@ -106,6 +106,8 @@ function createSessionOwner(context: {
     },
   )
   return {
+    approval: request => owner.offerApproval(request),
+    approvalResolved: id => owner.approvalResolved(id),
     start: threadId => owner.start(threadId, context.ownerSocket),
     prepare: fromThreadId => owner.prepareThreadTransition(fromThreadId),
     commit: (_fromThreadId, toThreadId) => owner.commitThreadTransition(toThreadId),

@@ -123,10 +123,12 @@ This covers text **and** files sent through `reply`, and nothing else. Do not se
 
 When Codex needs an approval (a command, a file change, extra permissions or one
 of this plugin's tools), the operator receives a card in their private chat with
-**Allow once**, sometimes **Allow session**, and **Deny**. The prompt in the
-terminal keeps working; whichever is answered first wins and the other is
-retired. Cards expire after ten minutes, and at the end of the session, as
-denied.
+**Allow**, **Always allow** and **Cancel**. Allow answers this one request;
+Always allow remembers the choice for later calls, exactly as the same answer in
+the terminal would. The prompt in the terminal keeps working; whichever is
+answered first wins and the other is retired. **Always allow** appears only when
+the request itself offers a lasting grant. Cards expire after ten minutes, and at
+the end of the session, as denied.
 
 On a fresh profile the first private chat you pair becomes the only operator.
 Later pairings can chat but cannot approve. To manage operators yourself:

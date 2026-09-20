@@ -3,7 +3,7 @@ import { createConnection, createServer, type Server, type Socket } from 'node:n
 import { dirname } from 'node:path'
 import { isRecord, type JsonObject } from '../shared/guards'
 import { isAbsolutePath, privateDirectory } from '../shared/private-fs'
-import { collectText, type Frame, FrameDecoder, serverTextFrame } from '../shared/ws-frames'
+import { clientFrame, collectText, type Frame, FrameDecoder, serverTextFrame } from '../shared/ws-frames'
 
 /**
  * A pass-through WebSocket proxy between the stock TUI and the App Server. It watches for the
@@ -15,7 +15,17 @@ import { collectText, type Frame, FrameDecoder, serverTextFrame } from '../share
  * Anything else is forwarded untouched. It never creates host requests, selects a thread or
  * replays history.
  */
+export type ApprovalRequest = { id: Id; method: string; params: JsonObject }
+
 export type OwnerTransition = {
+  /**
+   * Offers a host approval request to the Telegram relay. The host addresses such a request to one
+   * client only, so the proxy hands every one it sees to the owner as well; the terminal keeps its own
+   * prompt and whichever side answers first wins. Resolves undefined when the relay does not answer.
+   */
+  approval?(request: ApprovalRequest): Promise<JsonObject | undefined>
+  /** The terminal answered this request first; any Telegram card for it is stale. */
+  approvalResolved?(id: Id): void
   start(threadId: string): Promise<void>
   prepare(fromThreadId: string): Promise<void>
   commit(fromThreadId: string, toThreadId: string): Promise<void>
@@ -36,6 +46,12 @@ export type TuiProxyOptions = { listenSocket: string; upstreamSocket: string; ow
 
 const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
 const ROOT_METHODS = ['thread/start', 'thread/resume', 'thread/fork']
+const APPROVAL_METHODS = new Set([
+  'item/commandExecution/requestApproval',
+  'item/fileChange/requestApproval',
+  'item/permissions/requestApproval',
+  'mcpServer/elicitation/request',
+])
 const MAX_HANDSHAKE_BYTES = 64 * 1024
 const MAX_BUFFERED_FRAMES = 1024
 const MAX_BUFFERED_BYTES = 16 * 1024 * 1024
@@ -190,6 +206,35 @@ function bridgeConnection(client: Socket, shared: Shared): void {
     client.end()
     setTimeout(() => client.destroy(), 100).unref()
   }
+  /** Host approval requests this connection has handed to the relay and nobody has answered yet. */
+  const offeredApprovals = new Set<Id>()
+  const offerApproval = (id: Id, method: string, params: JsonObject, jsonrpc: boolean): void => {
+    const offer = shared.owner.approval?.({ id, method, params })
+    if (offer === undefined) return
+    offeredApprovals.add(id)
+    shared.track(
+      offer.then(
+        result => {
+          // The terminal may have answered while the card was out; only the first answer is sent.
+          if (closed || result === undefined || !offeredApprovals.delete(id)) return
+          upstream.write(
+            clientFrame(0x81, Buffer.from(JSON.stringify({ ...(jsonrpc ? { jsonrpc: '2.0' } : {}), id, result }))),
+          )
+          client.write(
+            serverTextFrame(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'serverRequest/resolved',
+                params: { threadId: params.threadId, requestId: id },
+              }),
+            ),
+          )
+        },
+        () => offeredApprovals.delete(id),
+      ),
+    )
+  }
+
   const reject = (request: { id: Id; jsonrpc?: '2.0' }, code: number, message: string) => {
     client.write(
       serverTextFrame(
@@ -287,6 +332,14 @@ function bridgeConnection(client: Socket, shared: Shared): void {
         }
         const request = parseRpc(message.payload)
         if (request === 'invalid') return terminate()
+        if (
+          request !== undefined &&
+          isId(request.id) &&
+          request.method === undefined &&
+          offeredApprovals.delete(request.id)
+        ) {
+          shared.owner.approvalResolved?.(request.id)
+        }
         if (request !== undefined && changesVisibleRoot(request) && !shared.claimRoot(client)) {
           if (!isId(request.id)) return terminate()
           reject(
@@ -343,6 +396,18 @@ function bridgeConnection(client: Socket, shared: Shared): void {
         }
         const response = parseRpc(message.payload)
         if (response === 'invalid') return terminate()
+        if (
+          response !== undefined &&
+          isId(response.id) &&
+          typeof response.method === 'string' &&
+          APPROVAL_METHODS.has(response.method)
+        )
+          offerApproval(
+            response.id,
+            response.method,
+            isRecord(response.params) ? response.params : {},
+            response.jsonrpc === '2.0',
+          )
         const active = pending
         if (active?.phase === 'committing') {
           if (answers(response, active)) {

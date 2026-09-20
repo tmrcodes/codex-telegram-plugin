@@ -4,7 +4,7 @@ import { isRecord, isTelegramUserId, type JsonObject, truncate } from '../shared
 import type { InlineKeyboard, TelegramApi } from '../telegram/bot-api'
 import { type AppServerTransport, SERVER_REQUEST_CANCELLED } from './transport'
 
-type Choice = 'accept' | 'acceptForSession' | 'decline' | 'cancel'
+type Choice = 'accept' | 'acceptForSession' | 'acceptAlways' | 'decline' | 'cancel'
 type Resolution = JsonObject | typeof SERVER_REQUEST_CANCELLED
 type Pending = {
   token: string
@@ -12,6 +12,8 @@ type Pending = {
   method: string
   params: JsonObject
   resolve: (value: Resolution) => void
+  /** Extra callers that were offered the same request; all of them get the one answer. */
+  joined: Array<(value: Resolution) => void>
   timer: ReturnType<typeof setTimeout>
   /** Cards sent after this point are retired immediately instead of being registered. */
   settled: boolean
@@ -43,6 +45,8 @@ export class ApprovalRelay {
   readonly #cleanup = new Set<Promise<void>>()
   /** Recently resolved cards, so a second tap answers "Already resolved" instead of nothing. */
   readonly #resolved = new Map<string, number>()
+  /** Callers waiting on a request that is already being projected, keyed the same way as pending. */
+  readonly #claims = new Map<string, Array<(value: Resolution) => void>>()
   #closed = false
 
   constructor(
@@ -92,12 +96,26 @@ export class ApprovalRelay {
     if (this.#operators() === undefined) return SERVER_REQUEST_CANCELLED
 
     const key = `${this.threadId}\x00${id}`
-    if ([...this.#pending.values()].some(pending => pending.key === key))
-      throw new Error('approval request already pending')
-    await this.rpc.request('thread/increment_elicitation', { threadId: this.threadId })
+    // The host addresses an approval to one client, and the TUI proxy offers us every one it sees,
+    // so the same request can arrive twice. One card, one answer, delivered to both callers.
+    const waiting = this.#claims.get(key)
+    if (waiting !== undefined) return await new Promise<Resolution>(resolve => waiting.push(resolve))
+    const joined: Array<(value: Resolution) => void> = []
+    this.#claims.set(key, joined)
+    const release = (value: Resolution): void => {
+      if (this.#claims.get(key) === joined) this.#claims.delete(key)
+      for (const resolve of joined.splice(0)) resolve(value)
+    }
+    try {
+      await this.rpc.request('thread/increment_elicitation', { threadId: this.threadId })
+    } catch (error) {
+      release(SERVER_REQUEST_CANCELLED)
+      throw error
+    }
     const operators = this.#operators()
     if (this.#closed || operators === undefined) {
       this.#releaseElicitation()
+      release(SERVER_REQUEST_CANCELLED)
       return SERVER_REQUEST_CANCELLED
     }
     return await new Promise<Resolution>(resolve => {
@@ -108,6 +126,7 @@ export class ApprovalRelay {
         method,
         params,
         resolve,
+        joined,
         settled: false,
         finalized: false,
         elicitationReleased: false,
@@ -119,6 +138,11 @@ export class ApprovalRelay {
       this.#sends.add(sending)
       void sending.finally(() => this.#sends.delete(sending))
     })
+  }
+
+  /** Another client answered this request first: retire any card that went out for it. */
+  resolved(requestId: string | number): void {
+    this.#retire(`${this.threadId}\x00${requestId}`)
   }
 
   /** Handles a tap on an approval card; only the operator who received that exact card counts. */
@@ -139,7 +163,7 @@ export class ApprovalRelay {
       from.id !== chat.id
     )
       return false
-    const match = /^perm:(once|session|deny):([a-km-z]{5})$/u.exec(query.data)
+    const match = /^perm:(once|always|deny):([a-km-z]{5})$/u.exec(query.data)
     if (match === null) return false
     const [, action, token] = match
     const card = `${chat.id}:${message.message_id}`
@@ -147,10 +171,17 @@ export class ApprovalRelay {
     if (pending === undefined) return (this.#resolved.get(`${token}:${card}`) ?? 0) >= Date.now() ? 'already' : false
     if (!(this.#operators()?.has(String(chat.id)) ?? false) || !pending.messages.has(card)) return false
     const choice: Choice =
-      action === 'once' ? 'accept' : action === 'session' ? 'acceptForSession' : denyChoice(pending.params)
+      action === 'once'
+        ? 'accept'
+        : action === 'always'
+          ? alwaysChoice(pending.method, pending.params)
+          : denyChoice(pending.params)
     if (
       (choice === 'accept' && !offersOnce(pending.params)) ||
-      (choice === 'acceptForSession' && !offersSession(pending.method, pending.params))
+      (choice !== 'accept' &&
+        choice !== 'decline' &&
+        choice !== 'cancel' &&
+        !offersAlways(pending.method, pending.params))
     )
       return false
     this.#finish(pending, choice)
@@ -174,11 +205,11 @@ export class ApprovalRelay {
     const keyboard: InlineKeyboard = {
       inline_keyboard: [
         [
-          ...(offersOnce(pending.params) ? [{ text: 'Allow once', callback_data: `perm:once:${pending.token}` }] : []),
-          ...(offersSession(pending.method, pending.params)
-            ? [{ text: 'Allow session', callback_data: `perm:session:${pending.token}` }]
+          ...(offersOnce(pending.params) ? [{ text: 'Allow', callback_data: `perm:once:${pending.token}` }] : []),
+          ...(offersAlways(pending.method, pending.params)
+            ? [{ text: 'Always allow', callback_data: `perm:always:${pending.token}` }]
             : []),
-          { text: 'Deny', callback_data: `perm:deny:${pending.token}` },
+          { text: 'Cancel', callback_data: `perm:deny:${pending.token}` },
         ],
       ],
     }
@@ -223,11 +254,13 @@ export class ApprovalRelay {
     pending.finalized = true
     pending.settled = true
     this.#pending.delete(pending.token)
+    if (this.#claims.get(pending.key) === pending.joined) this.#claims.delete(pending.key)
     clearTimeout(pending.timer)
     const now = Date.now()
     for (const [card, expiresAt] of this.#resolved) if (expiresAt < now) this.#resolved.delete(card)
     for (const card of pending.messages) this.#resolved.set(`${pending.token}:${card}`, now + APPROVAL_TIMEOUT_MS)
     pending.resolve(result)
+    for (const waiting of pending.joined.splice(0)) waiting(result)
     if (!pending.elicitationReleased) {
       pending.elicitationReleased = true
       this.#releaseElicitation()
@@ -267,6 +300,7 @@ export class ApprovalRelay {
 
 function decision(method: string, params: JsonObject, choice: Choice): JsonObject {
   if (method === MCP_APPROVAL) {
+    if (choice === 'acceptAlways') return { action: 'accept', content: null, _meta: { persist: 'always' } }
     return choice === 'accept'
       ? { action: 'accept', content: {}, _meta: null }
       : { action: 'decline', content: null, _meta: null }
@@ -274,9 +308,9 @@ function decision(method: string, params: JsonObject, choice: Choice): JsonObjec
   if (method === PERMISSIONS_APPROVAL) {
     return choice === 'decline' || choice === 'cancel'
       ? { permissions: {}, scope: 'turn' }
-      : { permissions: params.permissions, scope: choice === 'acceptForSession' ? 'session' : 'turn' }
+      : { permissions: params.permissions, scope: choice === 'accept' ? 'turn' : 'session' }
   }
-  return { decision: choice }
+  return { decision: choice === 'acceptAlways' ? 'acceptForSession' : choice }
 }
 
 /** Some hosts nest the MCP elicitation under `request`; lift it to the top level. */
@@ -437,6 +471,18 @@ function offersSession(method: string, params: JsonObject): boolean {
   return method !== MCP_APPROVAL && (method === PERMISSIONS_APPROVAL || offers(params, 'acceptForSession'))
 }
 
+/** `Always allow` exists when the host offers a persistent grant: `always` for a tool, the session otherwise. */
+function offersAlways(method: string, params: JsonObject): boolean {
+  if (method !== MCP_APPROVAL) return offersSession(method, params)
+  const meta = isRecord(params._meta) ? params._meta : undefined
+  return Array.isArray(meta?.persist) && meta.persist.includes('always')
+}
+
+/** The strongest persistent grant this request accepts. */
+function alwaysChoice(method: string, params: JsonObject): Choice {
+  return method === MCP_APPROVAL ? 'acceptAlways' : 'acceptForSession'
+}
+
 function denyChoice(params: JsonObject): Choice {
   return offers(params, 'decline') ? 'decline' : 'cancel'
 }
@@ -454,7 +500,7 @@ function describe(method: string, params: JsonObject): string {
       })
     return truncate(
       `Codex tool approval\nServer: ${plain(params.serverName as string)}\n${plain(params.message as string)}\n${lines.join('\n')}\n\n` +
-        'Allow once applies only to this request. No persistent grant.\nPreview may be shortened; inspect the full request in Codex if needed.',
+        'Allow applies to this request only; Always allow remembers it for later calls.\nPreview may be shortened; inspect the full request in Codex if needed.',
       3500,
     )
   }

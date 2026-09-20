@@ -32,7 +32,7 @@ export type StartStage =
   | 'owner-bridge-setup'
 
 type ClosableTransport = AppServerTransport & { close(): void }
-type Relay = Pick<ApprovalRelay, 'callback' | 'install' | 'isQuiescent'>
+type Relay = Pick<ApprovalRelay, 'callback' | 'install' | 'isQuiescent' | 'request' | 'resolved'>
 type HostLink = {
   controller: ThreadController
   transport: ClosableTransport
@@ -132,6 +132,27 @@ export class SessionOwner implements BridgeTarget {
     } catch (error) {
       throw new Error(safeToolError(error))
     }
+  }
+
+  /**
+   * An approval request the TUI proxy saw on its way to the terminal. The host addresses such a
+   * request to one client only, so the proxy offers every one to the bound thread's relay as well.
+   * Resolves undefined when the relay does not answer and the terminal keeps it.
+   */
+  async offerApproval(request: {
+    id: string | number
+    method: string
+    params: JsonObject
+  }): Promise<JsonObject | undefined> {
+    const active = this.#active
+    if (active === undefined || active.stopped) return undefined
+    const result = await active.relay.request(request.id, request.method, request.params)
+    return result === SERVER_REQUEST_CANCELLED ? undefined : result
+  }
+
+  /** The terminal answered first; the card for that request is stale. */
+  approvalResolved(id: string | number): void {
+    this.#active?.relay.resolved(id)
   }
 
   // ---- thread transitions (/new, /resume, fork) --------------------------------------------

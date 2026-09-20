@@ -12,7 +12,7 @@ This is an independent project, not an official OpenAI plugin.
 
 ## Requirements
 
-- Codex CLI with plugin support, signed in. Tested with `0.154.0` on macOS.
+- Codex CLI with plugin support, signed in. Tested with `0.154.0` and `0.155.1` on macOS.
 - [Bun](https://bun.sh) `1.3` or newer on your `PATH`.
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 
