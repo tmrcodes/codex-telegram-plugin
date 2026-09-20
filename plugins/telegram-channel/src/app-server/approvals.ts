@@ -33,7 +33,16 @@ const METHODS = new Set([
 ])
 const APPROVAL_TIMEOUT_MS = 10 * 60_000
 const CLOSE_WAIT_MS = 250
-const RESOLVED_TEXT = 'Codex approval resolved.'
+const OUTCOME = {
+  accept: 'Allowed.',
+  acceptForSession: 'Always allowed.',
+  acceptAlways: 'Always allowed.',
+  decline: 'Cancelled.',
+  cancel: 'Cancelled.',
+} as const satisfies Record<Choice, string>
+const ANSWERED_ELSEWHERE = 'Answered in Codex.'
+const EXPIRED_TEXT = 'Approval expired without an answer.'
+const SESSION_ENDED_TEXT = 'Cancelled: the Codex session ended.'
 
 /**
  * Projects the host's approval requests for one thread into the private Telegram DM of each
@@ -83,7 +92,8 @@ export class ApprovalRelay {
       unnotification()
       for (const pending of this.#pending.values()) pending.settled = true
       await settleBriefly([...this.#sends])
-      for (const pending of [...this.#pending.values()]) this.#finish(pending, denyChoice(pending.params))
+      for (const pending of [...this.#pending.values()])
+        this.#finish(pending, denyChoice(pending.params), SESSION_ENDED_TEXT)
       await settleBriefly([...this.#cleanup])
     }
   }
@@ -131,7 +141,7 @@ export class ApprovalRelay {
         finalized: false,
         elicitationReleased: false,
         messages: new Set(),
-        timer: setTimeout(() => this.#finish(pending, denyChoice(params)), APPROVAL_TIMEOUT_MS),
+        timer: setTimeout(() => this.#finish(pending, denyChoice(params), EXPIRED_TEXT), APPROVAL_TIMEOUT_MS),
       }
       this.#pending.set(token, pending)
       const sending = this.#send(pending, operators)
@@ -216,7 +226,7 @@ export class ApprovalRelay {
     try {
       for (const chatId of operators) {
         if (this.#closed) {
-          this.#finish(pending, denyChoice(pending.params))
+          this.#finish(pending, denyChoice(pending.params), SESSION_ENDED_TEXT)
           return
         }
         // An operator removed while cards are going out must not receive one.
@@ -235,8 +245,8 @@ export class ApprovalRelay {
     }
   }
 
-  #finish(pending: Pending, choice: Choice): void {
-    this.#finalize(pending, decision(pending.method, pending.params, choice))
+  #finish(pending: Pending, choice: Choice, closing: string = OUTCOME[choice]): void {
+    this.#finalize(pending, decision(pending.method, pending.params, choice), closing)
   }
 
   /** The request was answered elsewhere (native UI, timeout on the host side). */
@@ -249,7 +259,7 @@ export class ApprovalRelay {
     }
   }
 
-  #finalize(pending: Pending, result: Resolution): void {
+  #finalize(pending: Pending, result: Resolution, closing: string = ANSWERED_ELSEWHERE): void {
     if (pending.finalized) return
     pending.finalized = true
     pending.settled = true
@@ -269,7 +279,7 @@ export class ApprovalRelay {
       (async () => {
         for (const card of pending.messages) {
           const [chatId, messageId] = card.split(':')
-          await this.#retireCard(chatId!, Number(messageId))
+          await this.#retireCard(chatId!, Number(messageId), closing)
         }
       })(),
     )
@@ -284,9 +294,9 @@ export class ApprovalRelay {
     )
   }
 
-  async #retireCard(chatId: string, messageId: number): Promise<void> {
+  async #retireCard(chatId: string, messageId: number, closing: string = ANSWERED_ELSEWHERE): Promise<void> {
     try {
-      await this.api.editMessageText(chatId, messageId, RESOLVED_TEXT, { reply_markup: { inline_keyboard: [] } })
+      await this.api.editMessageText(chatId, messageId, closing, { reply_markup: { inline_keyboard: [] } })
     } catch {
       /* a stale card cannot regain authority */
     }

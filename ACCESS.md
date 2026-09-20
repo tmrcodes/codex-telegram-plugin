@@ -127,8 +127,9 @@ of this plugin's tools), the operator receives a card in their private chat with
 Always allow remembers the choice for later calls, exactly as the same answer in
 the terminal would. The prompt in the terminal keeps working; whichever is
 answered first wins and the other is retired. **Always allow** appears only when
-the request itself offers a lasting grant. Cards expire after ten minutes, and at
-the end of the session, as denied.
+the request itself offers a lasting grant. An answered card is replaced by what
+happened to it — allowed, always allowed, cancelled, expired, or answered in
+Codex. Cards expire after ten minutes, and at the end of the session, as denied.
 
 On a fresh profile the first private chat you pair becomes the only operator.
 Later pairings can chat but cannot approve. To manage operators yourself:
