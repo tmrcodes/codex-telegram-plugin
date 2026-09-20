@@ -368,16 +368,16 @@ function bridgeConnection(client: Socket, shared: Shared): void {
           // The terminal answers what it was shown, so the answer belongs to the delivered generation.
           const delivered = deliveredGenerations.get(request.id)
           const key = delivered === undefined ? undefined : generationKey(request.id, delivered)
+          // The barrier is for one answer, and this is that answer whichever rule drops it.
+          const barrier = staleAnswerBarriers.get(request.id)
+          staleAnswerBarriers.delete(request.id)
           // The host already has an answer for that exact request: a second response could carry the
           // opposite decision, so this late one is dropped instead of forwarded.
           if (key !== undefined && answeredApprovals.has(key)) continue
-          const barrier = staleAnswerBarriers.get(request.id)
-          if (barrier !== undefined) {
-            staleAnswerBarriers.delete(request.id)
-            // Only an approval can be answered twice in a way that matters, and only while the barrier
-            // is fresh: after it, an answer on this ID is taken at face value again.
-            if (barrier > Date.now() && key !== undefined && approvalGenerations.has(key)) continue
-          }
+          // Only an approval can be answered twice in a way that matters, and only while the barrier is
+          // fresh: after it, an answer on this ID is taken at face value again.
+          if (barrier !== undefined && barrier > Date.now() && key !== undefined && approvalGenerations.has(key))
+            continue
           if (key !== undefined && offeredApprovals.delete(key)) shared.owner.approvalResolved?.(request.id)
         }
         if (request !== undefined && changesVisibleRoot(request) && !shared.claimRoot(client)) {
