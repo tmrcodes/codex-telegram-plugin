@@ -190,6 +190,8 @@ function bridgeConnection(client: Socket, shared: Shared): void {
   let ending = false
   // Host messages that arrive while the owner commits are held so the TUI sees the root response first.
   let held: Frame[][] = []
+  /** IDs and generations of held host requests, marked delivered only when the buffer is flushed. */
+  let heldDeliveries: Array<[Id, number]> = []
   let heldFrames = 0
   let heldBytes = 0
 
@@ -206,32 +208,59 @@ function bridgeConnection(client: Socket, shared: Shared): void {
     client.end()
     setTimeout(() => client.destroy(), 100).unref()
   }
-  /** Host approval requests this connection has handed to the relay and nobody has answered yet. */
-  const offeredApprovals = new Set<Id>()
-  const offerApproval = (id: Id, method: string, params: JsonObject, jsonrpc: boolean): void => {
+  /**
+   * The host numbers its requests per connection and may reuse an ID once the previous request is
+   * gone, so an ID alone cannot say which request an answer belongs to. Every server request takes the
+   * next generation of its ID; the terminal can only be answering the generation it was actually shown,
+   * and an answer the relay already sent for that exact generation must not travel a second time.
+   */
+  const requestGenerations = new Map<Id, number>()
+  const deliveredGenerations = new Map<Id, number>()
+  /**
+   * A terminal answer carries the request ID and nothing else, so the generation it answers is the one
+   * the terminal was shown. That is exact while an ID identifies one request at a time, which is what
+   * this host does: it numbers server requests upwards per connection and does not reuse them. A host
+   * that did reuse an ID could have an answer to the previous request attributed to the new one, and
+   * the wire gives us nothing to tell those two answers apart; guarding against it by holding a barrier
+   * on the ID trades that for dropping a genuine answer, which leaves a request unanswered instead.
+   */
+  /** `id:generation` of requests offered to the relay and not yet answered. */
+  const offeredApprovals = new Set<string>()
+  /** `id:generation` of requests the relay answered; a terminal answer for one of these is late. */
+  const answeredApprovals = new Set<string>()
+  const generationKey = (id: Id, generation: number): string => `${typeof id}:${String(id)}:${generation}`
+  const nextGeneration = (id: Id): number => {
+    const generation = (requestGenerations.get(id) ?? 0) + 1
+    requestGenerations.set(id, generation)
+    return generation
+  }
+  const offerApproval = (id: Id, generation: number, method: string, params: JsonObject, jsonrpc: boolean): void => {
     const offer = shared.owner.approval?.({ id, method, params })
     if (offer === undefined) return
-    offeredApprovals.add(id)
-    shared.track(
-      offer.then(
-        result => {
-          // The terminal may have answered while the card was out; only the first answer is sent.
-          if (closed || result === undefined || !offeredApprovals.delete(id)) return
-          upstream.write(
-            clientFrame(0x81, Buffer.from(JSON.stringify({ ...(jsonrpc ? { jsonrpc: '2.0' } : {}), id, result }))),
-          )
-          client.write(
-            serverTextFrame(
-              JSON.stringify({
-                jsonrpc: '2.0',
-                method: 'serverRequest/resolved',
-                params: { threadId: params.threadId, requestId: id },
-              }),
-            ),
-          )
-        },
-        () => offeredApprovals.delete(id),
-      ),
+    const key = generationKey(id, generation)
+    offeredApprovals.add(key)
+    // Deliberately not tracked with the root transitions: an unanswered card settles only when the relay
+    // closes, and `close()` awaits tracked work *before* closing the owner, so tracking this would hold
+    // shutdown open for the whole approval timeout.
+    void offer.then(
+      result => {
+        // The terminal may have answered while the card was out; only the first answer is sent.
+        if (closed || result === undefined || !offeredApprovals.delete(key)) return
+        answeredApprovals.add(key)
+        upstream.write(
+          clientFrame(0x81, Buffer.from(JSON.stringify({ ...(jsonrpc ? { jsonrpc: '2.0' } : {}), id, result }))),
+        )
+        client.write(
+          serverTextFrame(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'serverRequest/resolved',
+              params: { threadId: params.threadId, requestId: id },
+            }),
+          ),
+        )
+      },
+      () => offeredApprovals.delete(key),
     )
   }
 
@@ -332,13 +361,14 @@ function bridgeConnection(client: Socket, shared: Shared): void {
         }
         const request = parseRpc(message.payload)
         if (request === 'invalid') return terminate()
-        if (
-          request !== undefined &&
-          isId(request.id) &&
-          request.method === undefined &&
-          offeredApprovals.delete(request.id)
-        ) {
-          shared.owner.approvalResolved?.(request.id)
+        if (request !== undefined && isId(request.id) && request.method === undefined) {
+          // The terminal answers what it was shown, so the answer belongs to the delivered generation.
+          const delivered = deliveredGenerations.get(request.id)
+          const key = delivered === undefined ? undefined : generationKey(request.id, delivered)
+          // The host already has an answer for that exact request: a second response could carry the
+          // opposite decision, so this late one is dropped instead of forwarded.
+          if (key !== undefined && answeredApprovals.has(key)) continue
+          if (key !== undefined && offeredApprovals.delete(key)) shared.owner.approvalResolved?.(request.id)
         }
         if (request !== undefined && changesVisibleRoot(request) && !shared.claimRoot(client)) {
           if (!isId(request.id)) return terminate()
@@ -396,17 +426,19 @@ function bridgeConnection(client: Socket, shared: Shared): void {
         }
         const response = parseRpc(message.payload)
         if (response === 'invalid') return terminate()
-        if (
-          response !== undefined &&
-          isId(response.id) &&
-          typeof response.method === 'string' &&
-          APPROVAL_METHODS.has(response.method)
-        )
+        // A server request takes the next generation of its ID; the terminal is only ever answering the
+        // generation it was shown, so delivery is what makes a generation current.
+        const incoming =
+          response !== undefined && isId(response.id) && typeof response.method === 'string'
+            ? ([response.id, nextGeneration(response.id)] as [Id, number])
+            : undefined
+        if (incoming !== undefined && APPROVAL_METHODS.has(String(response!.method)))
           offerApproval(
-            response.id,
-            response.method,
-            isRecord(response.params) ? response.params : {},
-            response.jsonrpc === '2.0',
+            incoming[0],
+            incoming[1],
+            String(response!.method),
+            isRecord(response!.params) ? response!.params : {},
+            response!.jsonrpc === '2.0',
           )
         const active = pending
         if (active?.phase === 'committing') {
@@ -418,12 +450,14 @@ function bridgeConnection(client: Socket, shared: Shared): void {
           if (heldFrames + message.frames.length > MAX_BUFFERED_FRAMES || heldBytes + bytesHeld > MAX_BUFFERED_BYTES)
             return terminate()
           held.push(message.frames)
+          if (incoming !== undefined) heldDeliveries.push(incoming)
           heldFrames += message.frames.length
           heldBytes += bytesHeld
           continue
         }
         if (active === undefined || !answers(response, active)) {
           forward(client, message.frames)
+          if (incoming !== undefined) deliveredGenerations.set(incoming[0], incoming[1])
           continue
         }
         if (active.phase !== 'awaiting-host') return terminate()
@@ -453,6 +487,7 @@ function bridgeConnection(client: Socket, shared: Shared): void {
             shared.setTransitionPending(client, false)
             forward(client, message.frames)
             for (const frames of held) forward(client, frames)
+            for (const [id, generation] of heldDeliveries.splice(0)) deliveredGenerations.set(id, generation)
             held = []
             heldFrames = 0
             heldBytes = 0
