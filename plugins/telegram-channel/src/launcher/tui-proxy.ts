@@ -398,6 +398,11 @@ function bridgeConnection(client: Socket, shared: Shared): void {
         }
         const response = parseRpc(message.payload)
         if (response === 'invalid') return terminate()
+        if (response !== undefined && isId(response.id) && typeof response.method === 'string') {
+          // A host request may reuse a JSON-RPC ID we have already answered. The tombstone belongs to
+          // the request that is gone, so it must not swallow the terminal's answer to this new one.
+          answeredApprovals.delete(response.id)
+        }
         if (
           response !== undefined &&
           isId(response.id) &&
