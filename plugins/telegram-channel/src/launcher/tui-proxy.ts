@@ -206,32 +206,36 @@ function bridgeConnection(client: Socket, shared: Shared): void {
     client.end()
     setTimeout(() => client.destroy(), 100).unref()
   }
-  /** Host approval requests this connection has handed to the relay and nobody has answered yet. */
+  /** Host approval requests this connection handed to the relay and nobody has answered yet. */
   const offeredApprovals = new Set<Id>()
+  /** Requests the relay already answered: a terminal answer for one of these is late and must not travel. */
+  const answeredApprovals = new Set<Id>()
   const offerApproval = (id: Id, method: string, params: JsonObject, jsonrpc: boolean): void => {
     const offer = shared.owner.approval?.({ id, method, params })
     if (offer === undefined) return
     offeredApprovals.add(id)
-    shared.track(
-      offer.then(
-        result => {
-          // The terminal may have answered while the card was out; only the first answer is sent.
-          if (closed || result === undefined || !offeredApprovals.delete(id)) return
-          upstream.write(
-            clientFrame(0x81, Buffer.from(JSON.stringify({ ...(jsonrpc ? { jsonrpc: '2.0' } : {}), id, result }))),
-          )
-          client.write(
-            serverTextFrame(
-              JSON.stringify({
-                jsonrpc: '2.0',
-                method: 'serverRequest/resolved',
-                params: { threadId: params.threadId, requestId: id },
-              }),
-            ),
-          )
-        },
-        () => offeredApprovals.delete(id),
-      ),
+    // Deliberately not tracked with the root transitions: an unanswered card settles only when the relay
+    // closes, and `close()` awaits tracked work *before* closing the owner, so tracking this would hold
+    // shutdown open for the whole approval timeout.
+    void offer.then(
+      result => {
+        // The terminal may have answered while the card was out; only the first answer is sent.
+        if (closed || result === undefined || !offeredApprovals.delete(id)) return
+        answeredApprovals.add(id)
+        upstream.write(
+          clientFrame(0x81, Buffer.from(JSON.stringify({ ...(jsonrpc ? { jsonrpc: '2.0' } : {}), id, result }))),
+        )
+        client.write(
+          serverTextFrame(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'serverRequest/resolved',
+              params: { threadId: params.threadId, requestId: id },
+            }),
+          ),
+        )
+      },
+      () => offeredApprovals.delete(id),
     )
   }
 
@@ -332,13 +336,11 @@ function bridgeConnection(client: Socket, shared: Shared): void {
         }
         const request = parseRpc(message.payload)
         if (request === 'invalid') return terminate()
-        if (
-          request !== undefined &&
-          isId(request.id) &&
-          request.method === undefined &&
-          offeredApprovals.delete(request.id)
-        ) {
-          shared.owner.approvalResolved?.(request.id)
+        if (request !== undefined && isId(request.id) && request.method === undefined) {
+          // The host already has an answer for this one: a second response could carry the opposite
+          // decision, so the late terminal answer is dropped instead of forwarded.
+          if (answeredApprovals.delete(request.id)) continue
+          if (offeredApprovals.delete(request.id)) shared.owner.approvalResolved?.(request.id)
         }
         if (request !== undefined && changesVisibleRoot(request) && !shared.claimRoot(client)) {
           if (!isId(request.id)) return terminate()

@@ -14,6 +14,8 @@ type Pending = {
   resolve: (value: Resolution) => void
   /** Extra callers that were offered the same request; all of them get the one answer. */
   joined: Array<(value: Resolution) => void>
+  /** Outcome line for cards of this request, including ones still being delivered when it was answered. */
+  closing: string
   timer: ReturnType<typeof setTimeout>
   /** Cards sent after this point are retired immediately instead of being registered. */
   settled: boolean
@@ -137,6 +139,7 @@ export class ApprovalRelay {
         params,
         resolve,
         joined,
+        closing: ANSWERED_ELSEWHERE,
         settled: false,
         finalized: false,
         elicitationReleased: false,
@@ -237,7 +240,7 @@ export class ApprovalRelay {
         const sent = await this.api.sendMessage(chatId, describe(pending.method, pending.params), {
           reply_markup: keyboard,
         })
-        if (pending.settled) await this.#retireCard(chatId, sent.message_id)
+        if (pending.settled) await this.#retireCard(chatId, sent.message_id, pending.closing)
         else pending.messages.add(`${chatId}:${sent.message_id}`)
       }
     } catch {
@@ -261,6 +264,7 @@ export class ApprovalRelay {
 
   #finalize(pending: Pending, result: Resolution, closing: string = ANSWERED_ELSEWHERE): void {
     if (pending.finalized) return
+    pending.closing = closing
     pending.finalized = true
     pending.settled = true
     this.#pending.delete(pending.token)
