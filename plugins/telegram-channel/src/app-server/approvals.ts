@@ -92,7 +92,12 @@ export class ApprovalRelay {
       this.#closed = true
       unrequest()
       unnotification()
-      for (const pending of this.#pending.values()) pending.settled = true
+      for (const pending of this.#pending.values()) {
+        pending.settled = true
+        // A card still being delivered is retired straight away with this outcome, before the loop
+        // below finishes the request, so it must already read as the shutdown it is.
+        pending.closing = SESSION_ENDED_TEXT
+      }
       await settleBriefly([...this.#sends])
       for (const pending of [...this.#pending.values()])
         this.#finish(pending, denyChoice(pending.params), SESSION_ENDED_TEXT)
