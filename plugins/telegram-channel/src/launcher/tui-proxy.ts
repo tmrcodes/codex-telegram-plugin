@@ -55,6 +55,7 @@ const APPROVAL_METHODS = new Set([
 const MAX_HANDSHAKE_BYTES = 64 * 1024
 const MAX_BUFFERED_FRAMES = 1024
 const MAX_BUFFERED_BYTES = 16 * 1024 * 1024
+const STALE_ANSWER_WINDOW_MS = 5_000
 const OWNER_FAILURE = -32011
 const TRANSITION_BUSY = -32012
 
@@ -216,10 +217,20 @@ function bridgeConnection(client: Socket, shared: Shared): void {
    */
   const requestGenerations = new Map<Id, number>()
   const deliveredGenerations = new Map<Id, number>()
+  /** `id:generation` of server requests that were approvals, so only those raise a stale-answer barrier. */
+  const approvalGenerations = new Set<string>()
+  /**
+   * A terminal answer carries only the ID, so an answer to an approval we already answered cannot be
+   * told apart from an answer to a request that reused the ID. After answering, the next answer on that
+   * ID is treated as the stale one and dropped, for a bounded moment: the terminal writes a late answer
+   * immediately, while an answer to a new request waits for a person.
+   */
+  const staleAnswerBarriers = new Map<Id, number>()
   /** `id:generation` of requests offered to the relay and not yet answered. */
   const offeredApprovals = new Set<string>()
   /** `id:generation` of requests the relay answered; a terminal answer for one of these is late. */
   const answeredApprovals = new Set<string>()
+  const generationKey = (id: Id, generation: number): string => `${typeof id}:${String(id)}:${generation}`
   const nextGeneration = (id: Id): number => {
     const generation = (requestGenerations.get(id) ?? 0) + 1
     requestGenerations.set(id, generation)
@@ -228,7 +239,7 @@ function bridgeConnection(client: Socket, shared: Shared): void {
   const offerApproval = (id: Id, generation: number, method: string, params: JsonObject, jsonrpc: boolean): void => {
     const offer = shared.owner.approval?.({ id, method, params })
     if (offer === undefined) return
-    const key = `${String(id)}:${generation}`
+    const key = generationKey(id, generation)
     offeredApprovals.add(key)
     // Deliberately not tracked with the root transitions: an unanswered card settles only when the relay
     // closes, and `close()` awaits tracked work *before* closing the owner, so tracking this would hold
@@ -238,6 +249,7 @@ function bridgeConnection(client: Socket, shared: Shared): void {
         // The terminal may have answered while the card was out; only the first answer is sent.
         if (closed || result === undefined || !offeredApprovals.delete(key)) return
         answeredApprovals.add(key)
+        staleAnswerBarriers.set(id, Date.now() + STALE_ANSWER_WINDOW_MS)
         upstream.write(
           clientFrame(0x81, Buffer.from(JSON.stringify({ ...(jsonrpc ? { jsonrpc: '2.0' } : {}), id, result }))),
         )
@@ -355,10 +367,17 @@ function bridgeConnection(client: Socket, shared: Shared): void {
         if (request !== undefined && isId(request.id) && request.method === undefined) {
           // The terminal answers what it was shown, so the answer belongs to the delivered generation.
           const delivered = deliveredGenerations.get(request.id)
-          const key = delivered === undefined ? undefined : `${String(request.id)}:${delivered}`
+          const key = delivered === undefined ? undefined : generationKey(request.id, delivered)
           // The host already has an answer for that exact request: a second response could carry the
           // opposite decision, so this late one is dropped instead of forwarded.
           if (key !== undefined && answeredApprovals.has(key)) continue
+          const barrier = staleAnswerBarriers.get(request.id)
+          if (barrier !== undefined) {
+            staleAnswerBarriers.delete(request.id)
+            // Only an approval can be answered twice in a way that matters, and only while the barrier
+            // is fresh: after it, an answer on this ID is taken at face value again.
+            if (barrier > Date.now() && key !== undefined && approvalGenerations.has(key)) continue
+          }
           if (key !== undefined && offeredApprovals.delete(key)) shared.owner.approvalResolved?.(request.id)
         }
         if (request !== undefined && changesVisibleRoot(request) && !shared.claimRoot(client)) {
@@ -423,7 +442,8 @@ function bridgeConnection(client: Socket, shared: Shared): void {
           response !== undefined && isId(response.id) && typeof response.method === 'string'
             ? ([response.id, nextGeneration(response.id)] as [Id, number])
             : undefined
-        if (incoming !== undefined && APPROVAL_METHODS.has(String(response!.method)))
+        if (incoming !== undefined && APPROVAL_METHODS.has(String(response!.method))) {
+          approvalGenerations.add(generationKey(incoming[0], incoming[1]))
           offerApproval(
             incoming[0],
             incoming[1],
@@ -431,6 +451,7 @@ function bridgeConnection(client: Socket, shared: Shared): void {
             isRecord(response!.params) ? response!.params : {},
             response!.jsonrpc === '2.0',
           )
+        }
         const active = pending
         if (active?.phase === 'committing') {
           if (answers(response, active)) {
